@@ -1,12 +1,17 @@
-##### Estimation for Topic Models ######
+##################  Supervised Estimation of Topic Models   #################
 
 ## intended main function; provides defaults and selects K via marginal lhd
+
+
 class_topics <- function(counts, 
                          K, 
                          known_samples=NULL, 
                          class_labs=NULL, 
-                         method=c("omega.fix", "theta.fix", "theta.prior", "no.fix"),
+                         method=c("omega.fix", "theta.fix", "theta.prior","no.fix"),
+                         optional_theta=NULL,
                          shrink=TRUE,
+                         shrink.method=c(1,2),
+                         mash_user=NULL,
                          shape=NULL, 
                          initopics=NULL, 
                          tol=0.1, 
@@ -15,6 +20,7 @@ class_topics <- function(counts,
                          ord=TRUE, verb=1, 
                          tmax=10000, wtol=10^(-4), 
                          qn=100, grp=NULL, admix=TRUE, 
+                         prior_omega = NULL, trim = 0,
                          nonzero=FALSE, dcut=-10)
   ## class.tpxselect defaults: tmax=10000, wtol=10^(-4), qn=100, grp=NULL, admix=TRUE, nonzero=FALSE, dcut=-10
 {
@@ -32,6 +38,20 @@ class_topics <- function(counts,
     K_classes <- 0
   }
   
+  if(is.null(prior_omega)){
+    prior_omega <- rep(1/K, K);
+  }else{
+    prior_omega <- (prior_omega/sum(prior_omega))
+  }
+  
+  if(trim < 0){
+    trim <- 0
+    message("trim has to be between 0 and 0.5, so taking trim to be 0")
+  }else if (trim > 0.5){
+    trim <- 0.5
+    message("trim has to be between 0 and 0.5, so taking trim to be 0.5")
+  }
+  
   if(method=="omega.fix"){
     if(K_classes < K){
       omega_known <- cbind(model.matrix(lm(1:length(class_labs) ~ as.factor(class_labs)-1)),
@@ -43,8 +63,19 @@ class_topics <- function(counts,
     omega_known=NULL;
   }
   
-  if(method=="theta.fix" || method=="theta.prior"){
-    theta_known <- thetaSelect(counts, known_samples, class_labs, shrink=shrink);
+  if(method != "no.fix"){
+    if(is.null(optional_theta)){
+    theta_known <- thetaSelect(counts, 
+                               known_samples, 
+                               class_labs, 
+                               shrink=shrink, 
+                               shrink.method = shrink.method,
+                               nchunks=nchunks,
+                               trim = trim,
+                               mash_user=mash_user);}
+    else{
+      theta_known <- optional_theta;
+    }
   }
  
   X <- CheckCounts(counts)
@@ -59,35 +90,58 @@ class_topics <- function(counts,
   ## check the list of candidate K values
   
   ## initialize
-  if(method=="omega.fix"){
-  unknown_samples <- setdiff(1:nrow(X), known_samples);
-  initopics <- class.tpxinit(X[unknown_samples[1:min(ceiling(length(unknown_samples)*.05),100)],], 
-                             K1=K, known_samples = NULL, omega_known=NULL, 
-                             initopics, K_classes=K_classes, method="no.fix", shape, verb)
-  }
+#  if(method=="omega.fix"){
+#  unknown_samples <- setdiff(1:nrow(X), known_samples);
+#  initopics <- class.tpxinit(X[unknown_samples[1:min(ceiling(length(unknown_samples)*.05),100)],], 
+#                             K1=K, known_samples = NULL, omega_known=NULL, 
+#                             initopics, K_classes=K_classes, method="no.fix", shape, verb)
+#  }
   
-  if(method=="theta.fix" || method=="theta.prior"){
+  if(method != "no.fix"){
     if(K_classes < K){
     initopics1 <- theta_known
-    initopics2 <- class.tpxinit(X[1:min(ceiling(nrow(X)*.05),100),], 
-                                K1=K- K_classes, known_samples=NULL, omega_known=NULL,
-                                initopics, K_classes=2, method="no.fix", shape, verb)
-    initopics <- cbind(initopics1, initopics2[,order(apply(initopics2,2, var), decreasing=FALSE)[1:(K-K_classes)]])
+    K1 <- K - K_classes;
+    X1 <- X[1:min(ceiling(nrow(X)*.1),100),]
+#    if(K1==1){
+#       initopics2 <- class.tpxinit(X1, K1=2, initheta=NULL, 
+#                                  K_classes=K_classes, 
+#                                  method="no.fix", 
+#                                  shape, verb)
+#    }else{
+#       initopics2 <- class.tpxinit(X1, K1=K1, initheta=NULL, 
+#                                  K_classes=K_classes, 
+#                                  method="no.fix", 
+#                                  shape, verb)
+#    }
+    if(K1==1){
+         initopics2 <- tpxinit(X1, initheta=NULL, K1=2,
+                                shape, verb, init.adapt = FALSE)
+    }else{
+         initopics2 <- tpxinit(X1, initheta=NULL, K1=K1,
+                            shape, verb, init.adapt = FALSE)
+    }
+    initopics <- cbind(initopics1, 
+                       initopics2[,order(apply(initopics2,2, var), 
+                          decreasing=FALSE)[1:(K-K_classes)]])
     }else{
       initopics <- theta_known;
     }
   }
   
   if(method=="no.fix"){
-    initopics <- class.tpxinit(X[1:min(ceiling(nrow(X)*.05),100),],
-                               K1=K, known_samples=NULL, omega_known=NULL,
-                              initopics, K_classes = K_classes, method=method, shape, verb)
+#    initopics <- class.tpxinit(X[1:min(ceiling(nrow(X)*.05),100),],
+#                               K1=K, initheta=NULL, K_classes = K_classes, 
+#                               method=method, shape, verb)
+    initopics2 <- tpxinit(X[1:min(ceiling(nrow(X)*.05),100)], 
+                          initheta=NULL, K1=K,
+                          shape, verb, init.adapt = FALSE)
   }
   
+  cat("start the fit \n")
   ## either search for marginal MAP K and return bayes factors, or just fit
   class.tpx <- class.tpxfit(X, known_samples, omega_known, initopics, 
                             K_classes = K_classes, alpha=shape, method=method, 
-                            tol, verb, admix, grp, tmax, wtol, qn)
+                            tol, verb, admix, prior_omega, grp, tmax, wtol, qn)
   
   #map.tpx <- maptpx::topics(counts, K=K, tol=tol)
  

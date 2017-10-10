@@ -1,0 +1,921 @@
+%\VignetteEngine{knitr::knitr}
+%\VignetteIndexEntry{Semi supervised Grade of Memebership models for RNA-seq data using classtpx}
+%\VignettePackage{classtpx}
+
+% To compile this document
+% library('knitr'); rm(list=ls()); knit('classtpx/vignettes/classtpx-vignette.Rnw')
+% library('knitr'); rm(list=ls()); knit2pdf('classtpx/vignettes/classtpx-vignette.Rnw'); openPDF('classtpx-vignette.pdf')
+%
+
+\documentclass[12pt]{article}
+
+\newcommand{\classtpx}{\textit{classtpx}}
+\newcommand\numberthis{\addtocounter{equation}{1}\tag{\theequation}}
+\usepackage{dsfont}
+\usepackage{cite}
+\usepackage{amsmath} 
+
+
+
+<<knitr, echo=FALSE, results="hide">>=
+library("knitr")
+opts_chunk$set(tidy=FALSE,tidy.opts=list(width.cutoff=30),dev="png",fig.show="hide",
+               fig.width=4,fig.height=7,
+               message=FALSE)
+@
+
+<<style, eval=TRUE, echo=FALSE, results="asis">>=
+BiocStyle::latex()
+@
+
+\author{Kushal K Dey, Chiaowen Joyce Hsiao \& Matthew Stephens \\[1em] \small{\textit{Stephens Lab}, The University of Chicago} \mbox{ }\\ \small{\texttt{$^*$Correspondending Email: mstephens@uchicago.edu}}}
+
+\bioctitle[Semi supervised Grade of Membership models for RNA-seq data using \classtpx{}]{Semi supervised Grade of Membership models for RNA-seq data using \classtpx{}}
+
+\begin{document}
+
+\maketitle
+
+<<options, results="hide", echo=FALSE>>=
+options(digits=3, width=80, prompt=" ", continue=" ")
+@
+
+\newpage
+
+\tableofcontents
+
+\section{Introduction}
+
+The Grade of Membership (GoM) model, as fitted by the \begin{verb} topics() \end{verb} function of the package \CRANpkg{maptpx} or the \begin{verb} FitGoM() \end{verb} in the package CountClust, suffers from the issue of identifiability, the reason being clusters that are determined in a completely unsupervised way. Oftentimes, we may have information about expression patterns of the biological clusters of interest. To cite an example, suppose we have RNA-seq data on blood samples (bulk or single cell) and also RNA-seq data on some FACS sorted single cells from Blood identifying different Blood cell types. Sequencing these FACS sorted cells gives us information of the expression patterns of the underlying cell types. One can view these cell types as potential clusters in clustering of RNA-seq data (non FACS sorted) from Blood. It is this prior information about the clusters that can ultimately lead to more distinct patterns of expression compared to unsupervised models and give a better sense about the mixing proportions of different cell types of interest in the samples.
+
+\section{Installation}
+
+To install the current working version of the \classtpx{} package, make sure FORTRAN compatibility.
+
+<<command_line, echo=TRUE, eval=FALSE>>=
+#curl -O http://r.research.att.com/libs/gfortran-4.8.2-darwin13.tar.bz2
+#sudo tar fvxz gfortran-4.8.2-darwin13.tar.bz2 -C /
+@ 
+
+To install the Github working version,
+
+<<install_classtpx, echo=TRUE, eval=FALSE>>=
+devtools::install_github("kkdey/classtpx")
+@
+
+To load the package
+
+<<load_classtpx, echo=TRUE, eval=TRUE>>=
+library("classtpx")
+@
+
+
+
+\section{Data Preparation}
+
+Recently a number of studies have been published on FACS sorted RNA-sequqnicng data with the aim of identifying distinct cell types of cell cycle phases. We are trying to build a library of data packages that seem relevant to our research interest and have them available as ExpressionSet objects (integrating the expression data succinctly with metadata information on samples and features). You can find a number of these data packages hosted on our Github pages \url{https://github.com/kkdey?tab=repositories} and \url{https://github.com/jhsiao999?tab=repositories}.
+
+We present an example of the Leng et al 2015 data [paper site: \url{http://www.nature.com/nmeth/journal/v12/n10/full/nmeth.3549.html}] of RNA-sequencing data on human embryonic stem cells. Total 213 H1 single cells and 247 H1-Fucci single cells were sequenced. The 213 H1 cells were used to evaluate Oscope in identifying oscillatory genes. The H1-Fucci cells were used to confirm the cell cycle gene cluster identified by Oscope in the H1 hESCs. In the dataset, we had cells labeled H1 (213), G1 (91), S (80) and G2 (76).
+
+
+<<leng_data_install, eval=FALSE>>=
+devtools::install_github("kkdey/singleCellRNASeqHumanLengESC", force=TRUE)
+@ %def
+
+<<leng_data_prepare, eval=TRUE>>=
+library(singleCellRNASeqHumanLengESC)
+data("HumanLengESC")
+leng_gene_names <- Biobase::featureNames(HumanLengESC);
+
+leng_data <- t(Biobase::exprs(HumanLengESC));
+leng_metadata <- Biobase::pData(HumanLengESC)
+leng_cell_state <- leng_metadata$cell_state;
+
+table(leng_cell_state)
+@ %def
+
+\section{Methods and Materials}
+
+The general framework for Grade of Membership (GoM) models is as follows.
+
+suppose $c_{ng}$ represents the read counts for sample $n$ and gene $g$. Then we assume the model
+
+\begin{equation}
+\left (c_{n1}, c_{n2}, \cdots, c_{nG} \right) \sim Mult \left (c_{n+}, p_{n1}, p_{n2}, \cdots, p_{nG} \right)
+\end{equation}
+
+where $p_{ng}$ represents the probability of observing a read mapping to gene $g$ from sample $n$. We write this probability as 
+
+\begin{equation}
+p_{ng} = \sum_{k=1}^{K} \omega_{nk} \theta_{kg} \hspace{1 cm} \sum_{k=1}^{K} \omega_{nk}=1 \hspace{0.5 cm} \forall n \hspace{1 cm} \sum_{g=1}^{G} \theta_{kg}=1 \hspace{0.5 cm} \forall k 
+\end{equation}
+
+where $\omega_{nk}$ represents membership probability of $k$ th cluster in the $n$ th sample and $\theta_{kg}$ represents cluster mass at gene $g$ for cluster $k$.
+
+In standard GoM models, the priors on $\omega$ and $\theta$ are non-informative.
+
+\begin{equation}
+\left(\omega_{n1}, \omega_{n2}, \cdots, \omega_{nK} \right) \sim Dir \left ( \frac{1}{K}, \frac{1}{K}, \cdots, \frac{1}{K} \right)
+\end{equation}
+
+\begin{equation}
+\left(\theta_{k1}, \theta_{k2}, \cdots, \theta_{kG} \right) \sim Dir \left ( \frac{1}{KG}, \frac{1}{KG}, \cdots, \frac{1}{KG} \right)
+\end{equation}
+
+Now in \classtpx{}, we assume that for some samples, the class labels or cluster labels are known. 
+This information is used to either drive the $\theta$ matrix or the $\omega$ matrix. For instance, in the Leng et al 2015 data, the three classes may be considered to be the G1, S and G2 phases. There are three methods we propose 
+
+\begin{itemize}
+
+\item \textbf{omega.fix}: We fix the $\omega$ vector for the samples for which the class labels are known. For instance, in the Leng et al 2015 data, for a classtpx model with K=3 representing the clusters due to G1, S and G2 phases, if the sample $n$ comes from the G1 phase, we fix $\omega_{n.} = (1,0,0)$. Similarly, if the sample comes from S or G2 phase, we fix $\omega_{n.}$ to be $(0,1,0)$ and $(0,0,1)$ respectively. For the cells corresponding to H1 phase, the $\omega$ vector is not known and estimated from the data. In mathematical terms, we can write the model for $\omega$ as follows 
+
+\begin{align*}
+\left(\omega_{n1}, \omega_{n2}, \cdots, \omega_{nK} \right) & = e_{k} \hspace{1 cm} if \hspace{0.5 cm} class(n) = k  \\
+\left(\omega_{n1}, \omega_{n2}, \cdots, \omega_{nK} \right) & \sim Dir \left ( \frac{1}{K}, \frac{1}{K}, \cdots, \frac{1}{K} \right) \hspace{1 cm} if \hspace{0.5 cm} class(n) = NULL \\
+\end{align*}
+
+where $class(n)$ represents the class label of the sample (it is NULL if the class label is not known). $e_{k}$ is the vector with $1$ at position $k$ and $0$ at all other positions of the vector. We then perform updates on the $\omega$ on the NULL class label samples and the $\theta$ matrix and the updating scheme is similar to the \begin{verb} topics() \end{verb} as in \CRANpkg{maptpx} package due to Matt Taddy.
+
+\item \textbf{theta.prior}: For each class label $k$, we pool all samples $n$ with $class(n)=k$, and then normalize the counts data to determine the prior $\theta$ matrix.
+
+\begin{align*}
+\theta_{kg} & = \frac{\sum_{n:class(n)=k} c_{ng}}{\sum_{g} \sum_{n:class(n)=k} c_{ng}} \hspace{0.5 cm} \forall g,  \hspace{0.5 cm} if \hspace{0.5 cm} card \{n: class(n)=k \} \neq 0 \nonumber \\
+\left(\theta_{k1}, \theta_{k2}, \cdots, \theta_{kG} \right) & \sim Dir \left ( \frac{1}{KG}, \frac{1}{KG}, \cdots, \frac{1}{KG} \right) \hspace{0.5 cm} if \hspace{0.5 cm} card \{n: class(n)=k \}= 0  \numberthis \label{eq:eq1} \\
+\end{align*}
+
+One can also apply adaptive shrinkage on the $\theta_{k.}$ values. In that case, define
+
+\begin{equation}
+\beta_{kg} = \frac{\sum_{n:class(n)=k} c_{ng}}{N_{k}} - \frac{\sum_{g} \sum_{n:class(n)=k} c_{ng}}{N} \hspace{0.5 cm}  card \{n: class(n)=k \}=N_{k}
+\end{equation}
+
+We assume
+
+\begin{equation}
+s_{kg} = \frac{1}{N_{k} (N_{k}-1)} \sum_{class(n)=k} \left (c_{ng} - \frac{\sum_{n:class(n)=k} c_{ng}}{N_{k}} \right )^{2} \hspace{0.5 cm} card \{n: class(n)=k \}=N_{k}
+\end{equation}
+
+Then we perform \begin{verb} ash \end{verb} on the vector $(\beta_{kg}, s_{kg})$ over all genes $g$ for each $k$ and then obtain the posterior mean of $\beta$, say $\beta_{post}(kg)$.
+
+We then fix the $\theta$ values as 
+
+\begin{equation}
+\theta^{\star}_{kg} = \frac{\sum_{g} \sum_{n:class(n)=k} c_{ng}}{N} + \beta_{post}(kg)
+\end{equation}
+
+So, in other words we assume
+
+\begin{align*}
+\theta_{kg} & = \theta^{\star}_{kg} \hspace{0.5 cm} \forall g,  \hspace{0.5 cm} if \hspace{0.5 cm} card \{n: class(n)=k \} \neq 0 \nonumber \\
+\left(\theta_{k1}, \theta_{k2}, \cdots, \theta_{kG} \right) & \sim Dir \left ( \frac{1}{KG}, \frac{1}{KG}, \cdots, \frac{1}{KG} \right) \hspace{0.5 cm} if \hspace{0.5 cm} card \{n: class(n)=k \}= 0 \numberthis \label{eq:eq2} \\
+\end{align*}
+
+These $\theta_{k.}$ as in Eqn \eqref{eq:eq1} or Eqn \eqref{eq:eq2} (depending on whether we use shrinkage or not) are then input into the GoM model framework as prior cluster probability vectors and we update them based on the data to find the posterior estimates at each stage of iteration (the updating scheme similar to the \begin{verb} topics() \end{verb} as in \CRANpkg{maptpx} package due to Matt Taddy).
+
+\item \textbf{theta.fix}: In this method, instead of setting $\theta_{k.}$ matrix for $k$ with $N_{k} \neq 0$ as prior, we fix them at these values and do not update them during the iterative steps. The only updates correspond to those $k$ for which $N_{k} = 0$, and the updating scheme is similar to the \begin{verb} topics() \end{verb} as in \CRANpkg{maptpx} package due to Matt Taddy.
+\end{itemize}
+
+\section{Results}
+
+We first cite the example of the Leng et al data and fit \begin{verb} classtpx() \end{verb} model on the data. 
+
+\subsection{Leng et al (2015)}
+
+We fix the class labels and the sample indices as follows.
+
+<<class_labels, eval=TRUE>>=
+index_1 <- which(leng_cell_state=="G1");
+index_2 <- which(leng_cell_state=="S");
+index_3 <- which(leng_cell_state=="G2");
+
+known_samples <- c(index_1, index_2, index_3);
+class_labs <- c(rep("G1", length(index_1)), 
+                rep("S", length(index_2)), 
+                rep("G2", length(index_3)));
+
+@ %def
+
+Then we can perform \begin{verb} classtpx() \end{verb} model for \begin{verb} omega.fix() \end{verb} method as follows 
+
+<<omega_fix_classtpx, eval=FALSE>>=
+Topic_clus <- classtpx::class_topics(
+    leng_data, 
+    K=3, 
+    known_samples = known_samples,
+    class_labs = class_labs,
+    method="omega.fix",
+    tol=0.01)
+
+save(Topic_clus, file="../data/leng_topic_fit_3_classtpx_omega_fix.rda")
+@ %def
+
+We can perform Structure plot visualization of the results.
+
+<<structure_leng_1, echo=TRUE, eval=TRUE, warning=FALSE, fig.show="asis", dpi=144, fig.width=3, fig.height=5, out.height="5 in", out.width="3 in">>=
+Topic_clus <- get(load(file="../data/leng_topic_fit_3_classtpx_omega_fix.rda"))
+
+omega <- Topic_clus$omega;
+
+annotation <- data.frame(
+  sample_id = paste0("X", c(1:NROW(omega))),
+  tissue_label = factor(leng_cell_state,
+                        levels = c("G1", "S", "G2", "H1") ) )
+
+
+rownames(omega) <- annotation$sample_id;
+
+
+CountClust::StructureGGplot(omega = omega,
+                annotation = annotation,
+                palette = RColorBrewer::brewer.pal(8, "Accent"),
+                yaxis_label = "Cell cycle phase",
+                order_sample = TRUE,
+                axis_tick = list(axis_ticks_length = .1,
+                                 axis_ticks_lwd_y = .1,
+                                 axis_ticks_lwd_x = .1,
+                                 axis_label_size = 7,
+                                 axis_label_face = "bold"))
+@ %def
+
+We now perform  \begin{verb} classtpx() \end{verb} model for \begin{verb} theta.prior() \end{verb} method.
+
+<<theta_prior_classtpx, eval=FALSE>>=
+Topic_clus <- classtpx::class_topics(
+    leng_data, 
+    K=3, 
+    known_samples = known_samples,
+    class_labs = class_labs,
+    method="theta.prior",
+    tol=0.01,
+    shrink=TRUE)
+
+save(Topic_clus, file="../data/leng_topic_fit_3_classtpx_theta_prior.rda")
+@ %def
+
+We can perform Structure plot visualization of the results.
+
+<<structure_leng_2, echo=TRUE, eval=TRUE, warning=FALSE, fig.show="asis", dpi=144, fig.width=3, fig.height=5, out.height="5 in", out.width="3 in">>=
+Topic_clus <- get(load(file="../data/leng_topic_fit_3_classtpx_theta_prior.rda"))
+
+omega <- Topic_clus$omega;
+
+annotation <- data.frame(
+  sample_id = paste0("X", c(1:NROW(omega))),
+  tissue_label = factor(leng_cell_state,
+                        levels = c("G1", "S", "G2", "H1") ) )
+
+
+rownames(omega) <- annotation$sample_id;
+
+
+CountClust::StructureGGplot(omega = omega,
+                annotation = annotation,
+                palette = RColorBrewer::brewer.pal(8, "Accent"),
+                yaxis_label = "Cell cycle phase",
+                order_sample = TRUE,
+                axis_tick = list(axis_ticks_length = .1,
+                                 axis_ticks_lwd_y = .1,
+                                 axis_ticks_lwd_x = .1,
+                                 axis_label_size = 7,
+                                 axis_label_face = "bold"))
+@ %def
+
+Finally we apply the \begin{verb} theta.fix() \end{verb} method.
+
+<<theta_fix_classtpx, eval=FALSE>>=
+Topic_clus <- classtpx::class_topics(
+    leng_data, 
+    K=3, 
+    known_samples = known_samples,
+    class_labs = class_labs,
+    method="theta.fix",
+    tol=0.01,
+    shrink=FALSE)
+
+save(Topic_clus, file="../data/leng_topic_fit_3_classtpx_theta_fix.rda")
+@ %def
+
+We can perform Structure plot visualization of the results.
+
+<<structure_leng_3, echo=TRUE, eval=TRUE, warning=FALSE, fig.show="asis", dpi=144, fig.width=3, fig.height=5, out.height="5 in", out.width="3 in">>=
+Topic_clus <- get(load(file="../data/leng_topic_fit_3_classtpx_theta_fix.rda"))
+
+omega <- Topic_clus$omega;
+
+annotation <- data.frame(
+  sample_id = paste0("X", c(1:NROW(omega))),
+  tissue_label = factor(leng_cell_state,
+                        levels = c("G1", "S", "G2", "H1") ) )
+
+
+rownames(omega) <- annotation$sample_id;
+
+
+CountClust::StructureGGplot(omega = omega,
+                annotation = annotation,
+                palette = RColorBrewer::brewer.pal(8, "Accent"),
+                yaxis_label = "Cell cycle phase",
+                order_sample = TRUE,
+                axis_tick = list(axis_ticks_length = .1,
+                                 axis_ticks_lwd_y = .1,
+                                 axis_ticks_lwd_x = .1,
+                                 axis_label_size = 7,
+                                 axis_label_face = "bold"))
+@ %def
+
+\subsection{Treutlin et al (2014)}
+
+Treutlin et al 2014 sequenced single cell transcriptome data from mouse lung epithelium. The cells were collected at various stages E14.5, E16.5, E18.5 and some adult replicates. We performed both \begin{verb} maptpx() \end{verb} model and \begin{verb} classtpx \end{verb} model fitting on this data.
+
+<<treutlin_data_install, eval=FALSE>>=
+devtools::install_github("jhsiao999/singleCellRNASeqMouseTreutleinLung", force=TRUE)
+@ %def
+
+<<treutlin_data_prepare, eval=TRUE>>=
+library(singleCellRNASeqMouseTreutleinLung)
+data("MouseTreutleinLung")
+leng_gene_names <- Biobase::featureNames(HumanLengESC);
+
+counts_data <- t(Biobase::exprs(MouseTreutleinLung));
+pheno_metadata <- pData(MouseTreutleinLung);
+table(pheno_metadata[,1])
+@ %def
+
+We first apply the maptpx model for $K=3$.
+
+<<maptpx_treutlin, echo=TRUE, eval=FALSE>>=
+Topic_clus <- maptpx::topics(counts_data, 3, tol=0.1);
+save(Topic_clus, file="../data/treutlin_topic_fit_3_maptpx.rda")
+@
+
+<<structure_treutlin_maptpx, echo=TRUE, eval=TRUE, warning=FALSE, fig.show="asis", dpi=144, fig.width=3, fig.height=5, out.height="5 in", out.width="3 in">>=
+Topic_clus <- get(load(file="../data/treutlin_topic_fit_3_maptpx.rda"))
+
+omega <- Topic_clus$omega;
+
+annotation <- data.frame(
+  sample_id = paste0("X", c(1:NROW(omega))),
+  tissue_label = factor(paste0(pheno_metadata$cell_type, "_", 
+                               pheno_metadata$replicate),
+                        levels=rev(c("E14.5_1", "E16.5_1", 
+                                     "E18.5_1","E18.5_2",
+                                     "E18.5_3","adult_replicate"))
+))
+
+rownames(omega) <- annotation$sample_id;
+
+
+CountClust::StructureGGplot(omega = omega,
+                annotation = annotation,
+                palette = RColorBrewer::brewer.pal(8, "Accent"),
+                yaxis_label = "Cell cycle phase",
+                order_sample = TRUE,
+                axis_tick = list(axis_ticks_length = .1,
+                                 axis_ticks_lwd_y = .1,
+                                 axis_ticks_lwd_x = .1,
+                                 axis_label_size = 7,
+                                 axis_label_face = "bold"))
+@ %def
+
+We next performed classtpx model for K=2  with \begin{verb} omega.fix() \end{verb} method.
+We chose E14.5 as one group and adult replicates as another group in defining class labels and
+assumed we do not have class label information for E16.5 and E18.5 phases.
+
+<<samples_treutlin, eval=TRUE>>=
+known_samples <- c(which(pheno_metadata$cell_type=="E14.5"), 
+                   which(pheno_metadata$cell_type=="adult"));
+class_labs <- c(rep(1, length(which(pheno_metadata$cell_type=="E14.5"))), 
+                rep(2,length(which(pheno_metadata$cell_type=="adult"))));
+@ %def
+
+<<classtpx_treutlin_omega_fix, eval=FALSE>>=
+Topic_clus <- classtpx::class_topics(
+    counts_data, 
+    K=2, 
+    known_samples = known_samples,
+    class_labs = class_labs,
+    method="omega.fix",
+    tol=0.01,
+    shrink=FALSE)
+
+save(Topic_clus, file="../rdas/treutlin_topic_fit_2_classtpx_omega_fix.rda")
+@
+
+<<structure_treutlin_classtpx_omega_fix, echo=TRUE, eval=TRUE, warning=FALSE, fig.show="asis", dpi=144, fig.width=3, fig.height=5, out.height="5 in", out.width="3 in">>=
+Topic_clus <- get(load(file="../data/treutlin_topic_fit_2_classtpx_omega_fix.rda"))
+
+omega <- Topic_clus$omega;
+
+annotation <- data.frame(
+  sample_id = paste0("X", c(1:NROW(omega))),
+  tissue_label = factor(paste0(pheno_metadata$cell_type, "_", 
+                               pheno_metadata$replicate),
+                        levels=rev(c("E14.5_1", "E16.5_1", 
+                                     "E18.5_1","E18.5_2",
+                                     "E18.5_3","adult_replicate"))
+))
+
+rownames(omega) <- annotation$sample_id;
+
+
+CountClust::StructureGGplot(omega = omega,
+                annotation = annotation,
+                palette = RColorBrewer::brewer.pal(8, "Accent"),
+                yaxis_label = "Cell cycle phase",
+                order_sample = TRUE,
+                axis_tick = list(axis_ticks_length = .1,
+                                 axis_ticks_lwd_y = .1,
+                                 axis_ticks_lwd_x = .1,
+                                 axis_label_size = 7,
+                                 axis_label_face = "bold"))
+@ %def
+
+We perform the method with \begin{verb} theta.fix() \end{verb} for K=2 and K=3.
+
+<<classtpx_treutlin_theta_fix_2, eval=FALSE>>=
+Topic_clus <- classtpx::class_topics(
+    counts_data, 
+    K=2, 
+    known_samples = known_samples,
+    class_labs = class_labs,
+    method="theta.fix",
+    tol=0.01,
+    shrink=FALSE)
+
+save(Topic_clus, file="../rdas/treutlin_topic_fit_2_classtpx_theta_fix.rda")
+@
+
+<<structure_treutlin_classtpx_theta_fix_2, echo=TRUE, eval=TRUE, warning=FALSE, fig.show="asis", dpi=144, fig.width=3, fig.height=5, out.height="5 in", out.width="3 in">>=
+Topic_clus <- get(load(file="../data/treutlin_topic_fit_2_classtpx_theta_fix.rda"))
+
+omega <- Topic_clus$omega;
+
+annotation <- data.frame(
+  sample_id = paste0("X", c(1:NROW(omega))),
+  tissue_label = factor(paste0(pheno_metadata$cell_type, "_", 
+                               pheno_metadata$replicate),
+                        levels=rev(c("E14.5_1", "E16.5_1", 
+                                     "E18.5_1","E18.5_2",
+                                     "E18.5_3","adult_replicate"))
+))
+
+rownames(omega) <- annotation$sample_id;
+
+
+CountClust::StructureGGplot(omega = omega,
+                annotation = annotation,
+                palette = RColorBrewer::brewer.pal(8, "Accent"),
+                yaxis_label = "Cell cycle phase",
+                order_sample = TRUE,
+                axis_tick = list(axis_ticks_length = .1,
+                                 axis_ticks_lwd_y = .1,
+                                 axis_ticks_lwd_x = .1,
+                                 axis_label_size = 7,
+                                 axis_label_face = "bold"))
+@ %def
+
+<<classtpx_treutlin_theta_fix_3, eval=FALSE>>=
+Topic_clus <- classtpx::class_topics(
+    counts_data, 
+    K=2, 
+    known_samples = known_samples,
+    class_labs = class_labs,
+    method="theta.fix",
+    tol=0.01,
+    shrink=FALSE)
+
+save(Topic_clus, file="../data/treutlin_topic_fit_3_classtpx_theta_fix.rda")
+@
+
+<<structure_treutlin_classtpx_theta_fix_3, echo=TRUE, eval=TRUE, warning=FALSE, fig.show="asis", dpi=144, fig.width=3, fig.height=5, out.height="5 in", out.width="3 in">>=
+Topic_clus <- get(load(file="../data/treutlin_topic_fit_3_classtpx_theta_fix.rda"))
+
+omega <- Topic_clus$omega;
+
+annotation <- data.frame(
+  sample_id = paste0("X", c(1:NROW(omega))),
+  tissue_label = factor(paste0(pheno_metadata$cell_type, "_", 
+                               pheno_metadata$replicate),
+                        levels=rev(c("E14.5_1", "E16.5_1", 
+                                     "E18.5_1","E18.5_2",
+                                     "E18.5_3","adult_replicate"))
+))
+
+rownames(omega) <- annotation$sample_id;
+
+
+CountClust::StructureGGplot(omega = omega,
+                annotation = annotation,
+                palette = RColorBrewer::brewer.pal(8, "Accent"),
+                yaxis_label = "Cell cycle phase",
+                order_sample = TRUE,
+                axis_tick = list(axis_ticks_length = .1,
+                                 axis_ticks_lwd_y = .1,
+                                 axis_ticks_lwd_x = .1,
+                                 axis_label_size = 7,
+                                 axis_label_face = "bold"))
+@ %def
+
+\subsection{Scialdone et al (2015)}
+
+Scialdone et al sequenced bulk-FACS sorted cells from phases G1, S and G2M phases. Also they sequenced a number of liver cells and they showed from PCA analysis that most of these liver cells seemed close to the G1 phase data. This was intuitive as most of these differentiated liver cells are in G1 phase. We perform classtpx here on the liver cells taking the bulk-RNA FACS sorted data from G1, S and G2M phases to represent three classes or clusters.
+
+<<scialdone_data_install, echo=TRUE, eval=FALSE>>=
+devtools::install_github("jhsiao999/singleCellRNASeqMouseScialdoneLiver", 
+                         force=TRUE);
+@
+
+<<scialdone_data_prepare, eval=TRUE>>=
+library(singleCellRNASeqMouseScialdoneLiver)
+data("MouseScialdoneLiver")
+liver_data <- t(Biobase::exprs(MouseScialdoneLiver));
+@ %def
+
+Now we install the bulk FACS sorted cell cycle data from Scialdone et al (2015).
+
+<<scialdone_data_install_2, echo=TRUE, eval=FALSE>>=
+devtools::install_github("jhsiao999/bulkRNASeqMouseScialdoneESC", force=TRUE);
+@
+
+<<scialdone_data_prepare_2, eval=TRUE>>=
+library(bulkRNASeqMouseScialdoneESC)
+data("MouseScialdoneESC")
+facs_data <- t(Biobase::exprs(MouseScialdoneESC));
+facs_pheno_metadata <- pData(MouseScialdoneESC);
+@ %def
+
+<<matching_features, echo=TRUE, eval=TRUE>>=
+indices_intersect <- intersect(featureNames(MouseScialdoneESC), 
+                               featureNames(MouseScialdoneLiver))
+
+matched_liver <-  match(indices_intersect, featureNames(MouseScialdoneLiver))
+liver_data_mod <- liver_data[,matched_liver];
+colnames(liver_data_mod) <- indices_intersect;
+
+matched_facs <- match(indices_intersect, featureNames(MouseScialdoneESC))
+facs_data_mod <- facs_data[,matched_facs];
+colnames(facs_data_mod) <-  indices_intersect;
+
+counts <- rbind(facs_data_mod, liver_data_mod);
+@
+
+We now fit the classtpx model with the first three samples (bulk FACS sorted data representing
+cell cycle classes G1, S and G2M respectively) assumed to be from known classes.
+
+<<samples_scialdone, eval=TRUE>>=
+known_samples <- 1:3;
+class_labs <-  1:3;
+@ %def
+
+<<classtpx_scialdone_omega_fix_3, eval=FALSE>>=
+Topic_clus <- classtpx::class_topics(
+    counts, 
+    K=3, 
+    known_samples = known_samples,
+    class_labs = class_labs,
+    method="omega.fix",
+    tol=0.01,
+    shrink=FALSE)
+
+save(Topic_clus, file="../data/scialdone_topic_fit_3_classtpx_omega_fix.rda")
+
+@
+
+<<structure_scialdone_classtpx_omega_fix_3, echo=TRUE, eval=TRUE, warning=FALSE, fig.show="asis", dpi=144, fig.width=3, fig.height=5, out.height="5 in", out.width="3 in">>=
+
+Topic_clus <- get(load("../data/scialdone_topic_fit_3_classtpx_omega_fix.rda"))
+omega <- Topic_clus$omega[-(1:3),];
+
+annotation <- data.frame(
+  sample_id = paste0("X", c(1:NROW(omega))),
+  tissue_label = factor(as.character(rep("Liver",96)))
+)
+
+rownames(omega) <- annotation$sample_id;
+
+
+CountClust::StructureGGplot(omega = omega,
+                annotation = annotation,
+                palette = RColorBrewer::brewer.pal(8, "Accent"),
+                yaxis_label = "Cell cycle phase",
+                order_sample = TRUE,
+                axis_tick = list(axis_ticks_length = .1,
+                                 axis_ticks_lwd_y = .1,
+                                 axis_ticks_lwd_x = .1,
+                                 axis_label_size = 7,
+                                 axis_label_face = "bold"))
+@ %def
+
+Note that all the cells seem to be represented by the first class which corresponds to the G1 phase. We perform the same analysis with \begin{verb} theta.fix() \end{verb} method.
+
+<<classtpx_scialdone_theta_fix_3, eval=FALSE>>=
+Topic_clus <- classtpx::class_topics(
+    counts, 
+    K=3, 
+    known_samples = known_samples,
+    class_labs = class_labs,
+    method="theta.fix",
+    tol=0.01,
+    shrink=FALSE)
+
+save(Topic_clus, file="../data/scialdone_topic_fit_3_classtpx_theta_fix.rda")
+@
+
+<<structure_scialdone_classtpx_theta_fix_3, echo=TRUE, eval=TRUE, warning=FALSE, fig.show="asis", dpi=144, fig.width=3, fig.height=5, out.height="5 in", out.width="3 in">>=
+
+Topic_clus <- get(load("../data/scialdone_topic_fit_3_classtpx_theta_fix.rda"))
+omega <- Topic_clus$omega[-(1:3),];
+
+annotation <- data.frame(
+  sample_id = paste0("X", c(1:NROW(omega))),
+  tissue_label = factor(as.character(rep("Liver",96)))
+)
+
+rownames(omega) <- annotation$sample_id;
+
+
+CountClust::StructureGGplot(omega = omega,
+                annotation = annotation,
+                palette = RColorBrewer::brewer.pal(8, "Accent"),
+                yaxis_label = "Cell cycle phase",
+                order_sample = TRUE,
+                axis_tick = list(axis_ticks_length = .1,
+                                 axis_ticks_lwd_y = .1,
+                                 axis_ticks_lwd_x = .1,
+                                 axis_label_size = 7,
+                                 axis_label_face = "bold"))
+@ %def
+
+Here also maximum representativeness is due to the cluster from G1 phase.
+
+\subsection{Buettner et al 2015 + Leng et al 2015}
+
+Buettner et al 2015 collected single cell RNA-seq FACS sorted data from cell cycle phases G1, G2 and S from mouse. Leng et al 2015 collected FACS sorted data from G1, G2 and S for humans. The idea was to see if we can use the FACS sorted mouse data coming from three cell cycle phases G1, G2 and S, to learn about human data and predict the cell cycle phases of the human data correctly.
+
+The one barrier to doing so is that the genes in humans and those in mouse are different. But there are many ortholog genes which are common between the two species and we extract such genes out using BioMart. 
+
+First we install and load the mouse single cell RNA-seq data due to Buettner et al 2015. 
+
+<<buettner_data_install, echo=TRUE, eval=FALSE>>=
+devtools::install_github("jhsiao999/singleCellRNASeqMouseBuettnerESC", force=TRUE)
+@
+
+<<buettner_data_prepare, echo=TRUE, eval=TRUE>>=
+library(singleCellRNASeqMouseBuettnerESC)
+data("MouseBuettnerESC")
+buettner_gene_names <- Biobase::featureNames(MouseBuettnerESC);
+
+buettner_data <- Biobase::exprs(MouseBuettnerESC);
+buettner_metadata <- Biobase::pData(MouseBuettnerESC)
+buettner_cell_state <- buettner_metadata$cell_cycle;
+
+table(buettner_cell_state)
+@
+
+We now extract the ortholog genes common between the Leng et al 2015 data and the Buettner et al 2015 data.
+
+<<ortholog_genes, echo=TRUE, eval=TRUE>>=
+library(biomaRt)
+human = useMart("ensembl", dataset = "hsapiens_gene_ensembl");
+attributes = c("ensembl_gene_id","mmusculus_homolog_ensembl_gene",
+               "mmusculus_homolog_perc_id_r1")
+attributes=c(attributes,"mmusculus_homolog_orthology_type",
+"mmusculus_homolog_subtype", "mmusculus_homolog_perc_id")
+orth.mouse.human = getBM(attributes,
+filters="with_homolog_mmus",values=TRUE, mart = human,
+uniqueRows=TRUE)
+@ %def
+
+We determine those ortholog human genes obtained above which have valid HGNC symbol 
+which has been used to report feature names in the Leng et al 2015 data
+
+<<ortholog_genes_2, echo=TRUE, eval=TRUE>>=
+filter_indices <- match(buettner_gene_names, orth.mouse.human[,2]);
+filter_indices <- filter_indices[!is.na(filter_indices)];
+ortholog_buettner_mouse_ids <- orth.mouse.human[filter_indices,2];
+ortholog_buettner_human_ids <- orth.mouse.human[filter_indices,1];
+
+human = useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+mySymbols <- ortholog_buettner_human_ids; # mySymbols is a vector of MGI symbols.
+gene_list_human <- getBM( attributes=c("ensembl_gene_id", "external_gene_name") , filters=
+"external_gene_name", values =c("ABCA1","ABCBB") ,mart=human)
+
+gene_names_human <- gene_list_human[,2];
+@ %def
+
+We filter the Leng et al data
+
+<<ortholog_genes_3, echo=TRUE, eval=TRUE>>=
+matched_human_gene_indices_leng <- match(gene_names_human, leng_gene_names)
+matched_human_gene_indices_leng <- 
+  matched_human_gene_indices_leng[!is.na(matched_human_gene_indices_leng)];
+
+
+matched_genes_leng <- leng_gene_names[matched_human_gene_indices_leng];
+
+filter_indices <- match(matched_genes_leng, leng_gene_names);
+
+leng_filtered_data <- leng_data[,filter_indices];
+@ %def
+
+Next we filter the Buettner et al data
+
+<<ortholog_genes_4, echo=TRUE, eval=TRUE>>=
+filter_indices <- match(gene_names_human, leng_gene_names);
+gene_list_human_filtered <- gene_list_human[which(!is.na(filter_indices)),];
+gene_names_human_filtered <- gene_list_human_filtered[,1];
+human_ids_buettner <- 
+  ortholog_buettner_human_ids[match(gene_names_human_filtered, 
+                                    ortholog_buettner_human_ids)];
+mouse_ortholog_ids_buettner <- 
+  ortholog_buettner_mouse_ids[match(gene_names_human_filtered, 
+                                    ortholog_buettner_human_ids)];
+
+filter_genes_buettner <- match(mouse_ortholog_ids_buettner, buettner_gene_names);
+
+buettner_filtered_data <- t(buettner_data[filter_genes_buettner,]);
+
+@ %def
+
+We pool the filtered data from Leng et al and Buettner et al containing expression patterns of ortholog matched genes.
+
+<<pooled_data, echo=TRUE>>=
+pooled_data <- rbind(buettner_filtered_data, leng_filtered_data);
+@
+
+We first apply the \begin{verb} topics() \end{verb} of the \begin{verb} maptpx() \end{verb} package to detrmine the unsupervised clustering patterns. 
+
+<<ortholog_maptpx, echo=TRUE, eval=FALSE>>=
+Topic_clus <- maptpx::topics(
+    pooled_data, 
+    K=3, 
+    tol=0.1
+    )
+
+save(Topic_clus, file="../data/leng_topic_fit_3_maptpx_buettner.rda")
+@
+
+<<structure_ortholog_maptpx,  echo=TRUE, eval=TRUE, warning=FALSE, fig.show="asis", dpi=144, fig.width=3, fig.height=5, out.height="5 in", out.width="3 in">>=
+
+Topic_clus <- get(load(file="../data/leng_topic_fit_3_maptpx_buettner.rda"))
+
+omega <- Topic_clus$omega;
+
+leng_cell_state_human <- paste0("human", "_", leng_cell_state);
+buettner_cell_state_mouse <- paste0("mouse","_", buettner_cell_state);
+
+annotation <- data.frame(
+  sample_id = paste0("X", c(1:NROW(omega))),
+  tissue_label = factor(c(as.character(buettner_cell_state_mouse), 
+                          as.character(leng_cell_state_human)),
+                        levels = c("mouse_G1", "mouse_S", "mouse_G2M",
+                                        "human_G1","human_S",
+                                         "human_G2", "human_H1") ) )
+
+
+rownames(omega) <- annotation$sample_id;
+
+
+CountClust::StructureGGplot(omega = omega,
+                annotation = annotation,
+                palette = RColorBrewer::brewer.pal(8, "Accent"),
+                yaxis_label = "Cell cycle phase",
+                order_sample = TRUE,
+                axis_tick = list(axis_ticks_length = .1,
+                                 axis_ticks_lwd_y = .1,
+                                 axis_ticks_lwd_x = .1,
+                                 axis_label_size = 7,
+                                 axis_label_face = "bold"))
+@
+
+Note that when the clustering is performed over mouse and human ortholog genes together, it seems to pick up those genes that separate the two species rather than finding out cell-cycle related structure. This is again more intuitive I guess as the inter species differences are way stronger than the cell cycle effect. 
+
+We next performed classtpx model by using the mouse data as training sample and we fit $K=3$ model with both \begin{verb} omega.fix() \end{verb} and \begin{verb} theta.fix() \end{verb} methods.
+
+<<class_labels_ortholog, eval=TRUE>>=
+known_samples <- 1:288;
+class_labs <- c(rep(1,96), rep(2,96), rep(3,96));
+@ %def
+
+<<classtpx_ortholog_omega_fix_3, eval=FALSE>>=
+Topic_clus <- classtpx::class_topics(
+    counts, 
+    K=3, 
+    known_samples = known_samples,
+    class_labs = class_labs,
+    method="omega.fix",
+    tol=0.01,
+    shrink=FALSE)
+
+save(Topic_clus, file="../data/leng_topic_fit_classtpx_omega_fix_buettner.rda")
+@
+
+<<structure_ortholog_classtpx_omega_fix_3, echo=TRUE, eval=TRUE, warning=FALSE, fig.show="asis", dpi=144, fig.width=3, fig.height=5, out.height="5 in", out.width="3 in">>=
+
+Topic_clus <- get(load("../data/leng_topic_fit_classtpx_omega_fix_buettner.rda"))
+omega <- Topic_clus$omega;
+
+leng_cell_state_human <- paste0("human", "_", leng_cell_state);
+buettner_cell_state_mouse <- paste0("mouse","_", buettner_cell_state);
+
+annotation <- data.frame(
+  sample_id = paste0("X", c(1:NROW(omega))),
+  tissue_label = factor(c(as.character(buettner_cell_state_mouse), 
+                          as.character(leng_cell_state_human)),
+                        levels = c("mouse_G1", "mouse_S", "mouse_G2M",
+                                        "human_G1","human_S",
+                                         "human_G2", "human_H1") ) )
+
+
+rownames(omega) <- annotation$sample_id;
+
+
+CountClust::StructureGGplot(omega = omega,
+                annotation = annotation,
+                palette = RColorBrewer::brewer.pal(8, "Accent"),
+                yaxis_label = "Cell cycle phase",
+                order_sample = TRUE,
+                axis_tick = list(axis_ticks_length = .1,
+                                 axis_ticks_lwd_y = .1,
+                                 axis_ticks_lwd_x = .1,
+                                 axis_label_size = 7,
+                                 axis_label_face = "bold"))
+@ %def
+
+<<classtpx_ortholog_theta_fix_3, eval=FALSE>>=
+Topic_clus <- classtpx::class_topics(
+    pooled_data, 
+    K=3, 
+    known_samples = known_samples,
+    class_labs = class_labs,
+    method="theta.fix",
+    tol=0.01,
+    shrink=FALSE)
+
+save(Topic_clus, file="../data/leng_topic_fit_classtpx_theta_fix_buettner.rda")
+@
+
+<<structure_ortholog_classtpx_theta_fix_3, echo=TRUE, eval=TRUE, warning=FALSE, fig.show="asis", dpi=144, fig.width=3, fig.height=5, out.height="5 in", out.width="3 in">>=
+
+Topic_clus <- get(load("../data/leng_topic_fit_classtpx_theta_fix_buettner.rda"))
+omega <- Topic_clus$omega;
+
+leng_cell_state_human <- paste0("human", "_", leng_cell_state);
+buettner_cell_state_mouse <- paste0("mouse","_", buettner_cell_state);
+
+annotation <- data.frame(
+  sample_id = paste0("X", c(1:NROW(omega))),
+  tissue_label = factor(c(as.character(buettner_cell_state_mouse), 
+                          as.character(leng_cell_state_human)),
+                        levels = c("mouse_G1", "mouse_S", "mouse_G2M",
+                                        "human_G1","human_S",
+                                         "human_G2", "human_H1") ) )
+
+
+rownames(omega) <- annotation$sample_id;
+
+
+CountClust::StructureGGplot(omega = omega,
+                annotation = annotation,
+                palette = RColorBrewer::brewer.pal(8, "Accent"),
+                yaxis_label = "Cell cycle phase",
+                order_sample = TRUE,
+                axis_tick = list(axis_ticks_length = .1,
+                                 axis_ticks_lwd_y = .1,
+                                 axis_ticks_lwd_x = .1,
+                                 axis_label_size = 7,
+                                 axis_label_face = "bold"))
+@ %def
+
+The above analysis (especially for the \begin{verb} theta.fix \end{verb} approach) shows that the cluster patterns obtained from cell cycle phases of mouse does not quite explain the patterns in the human data. One reason could be because we have pooled all the ortholog genes in this analysis
+and not just the cell-cycle related genes. It could also mean the orthologs of cell-cycle genes for mouse may not be cell-cycle related genes for humans.
+
+\section{Discussion}
+
+\begin{itemize}
+
+\item Since the number of features (genes) is usually way larger than the number of samples in RNA-seq data, it is important to protect the analysis from noisy genes which are not informative biologically but incorporate a lot of variation that can compromise the results. We use the adaptive shrinkage method (check Methods and Materials) through \begin{verb} shrink=TRUE \end{verb} to effectively reweigh the variables based on their within-class variation. The shrinkage method adopted may be improved by using FASH due to Mengyin Lu \url{https://github.com/mengyin/ashlar-fash}. Her model shrinks the F-statistics derived from the following linear model (which may be applied on voom transformed data)
+
+\begin{equation}
+Y_{ng}=\mu_{g}+\beta_{cl(n),g}+e_{ng} \hspace{1 cm} \beta_{cl(n),g} \sim N(0, \sigma^2) \hspace{1 cm} e_{ng} \sim N(0, s^2)
+\end{equation}
+
+However I am not sure how I can go from shrunk F-statistics in this model to shrunk estimates 
+of $\beta$ values, which I think is what I may need ultimately to obtain refined estimates of $\theta$.
+
+\item We may want to indicate in the Structure plot visualization, which samples have known class labels and what that class label is, compared to the ones for which we have no information about class labels. This would be particularly handy in case of \begin{verb} theta.fix() \end{verb} or \begin{verb} theta.prior \end{verb} models where it is not clear just from viewing the Structure plot, which of the samples have known cluster memberships.
+
+\item So far the attempt has been to take data from multiple experiments across labs and then check how far the knowledge of patterns from experiment in one lab can explain the patterns in the other. But there seems to be differences probably resulting from lab effects or batch or plate effects (cases in point: Buettner + Scialdone 2015 data analysis, Deng et al 2014 + Blakeley et al 2015 data analysis).
+
+\item For additional simulated data and  real data applications of the \classtpx{} package, please check \textit{Cell classification using classtpx} section in \url{http://jhsiao999.github.io/singleCell-method/} and for codes and source files, please check: \url{https://github.com/kkdey/classtpx}.
+
+\end{itemize}
+
+
+\section{Session Info}
+
+<<session_info, eval=TRUE>>=
+sessionInfo()
+@ %def
+
+\end{document}
